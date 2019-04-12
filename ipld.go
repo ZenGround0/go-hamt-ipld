@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"time"
+	"fmt"
 
 	/*
 		bstore "github.com/ipfs/go-ipfs/blocks/blockstore"
@@ -12,14 +13,18 @@ import (
 	*/
 
 	block "github.com/ipfs/go-block-format"
+	blockstore "github.com/ipfs/go-ipfs-blockstore"
 	cbor "github.com/ipfs/go-ipld-cbor"
 	recbor "github.com/polydawn/refmt/cbor"
 	atlas "github.com/polydawn/refmt/obj/atlas"
-	//ds "gx/ipfs/QmdHG8MAuARdGHxx4rPQASLcvhz24fzjSQq7AJRAQEorq5/go-datastore"
+	ds "github.com/ipfs/go-datastore"
 	cid "github.com/ipfs/go-cid"
 )
 
 // THIS IS ALL TEMPORARY CODE
+// ALL SOFTWARE IS TEMPORARY!!
+
+var sessionCount map[string]int
 
 func init() {
 	cbor.RegisterCborType(cbor.BigIntAtlasEntry)
@@ -37,6 +42,10 @@ func init() {
 			}, nil
 		})).Complete()
 	cbor.RegisterCborType(kvAtlasEntry)
+
+	sessionCount = make(map[string]int)
+	sessionCount["adds"] = 0
+	sessionCount["biggest"] = 0	
 }
 
 type CborIpldStore struct {
@@ -47,6 +56,7 @@ type CborIpldStore struct {
 type blocks interface {
 	GetBlock(context.Context, cid.Cid) (block.Block, error)
 	AddBlock(block.Block) error
+	Blockstore() blockstore.Blockstore
 }
 
 type mockBlocks struct {
@@ -68,6 +78,10 @@ func (mb *mockBlocks) GetBlock(ctx context.Context, cid cid.Cid) (block.Block, e
 func (mb *mockBlocks) AddBlock(b block.Block) error {
 	mb.data[b.Cid()] = b.RawData()
 	return nil
+}
+
+func (mb *mockBlocks) Blockstore() blockstore.Blockstore {
+	return blockstore.NewBlockstore(ds.NewMapDatastore())
 }
 
 func NewCborStore() *CborIpldStore {
@@ -108,9 +122,42 @@ func (s *CborIpldStore) Put(ctx context.Context, v interface{}) (cid.Cid, error)
 		return cid.Cid{}, err
 	}
 
+	// Don't add up storage if already stored.
+	if has, err := s.Blocks.Blockstore().Has(nd.Cid()); err != nil && has {
+		return nd.Cid(), nil
+	}
+
 	if err := s.Blocks.AddBlock(nd); err != nil {
 		return cid.Cid{}, err
 	}
 
+	// Record bytes for this invocation
+	id, ok := ctx.Value("flush-point").(string)
+	if id != "" {
+		if !ok {
+			panic("flush-point is not a string, weird")
+		}
+		putBytes := len(nd.RawData())
+		if _, ok := sessionCount[id]; !ok {
+			sessionCount[id] = 0
+		}
+		sessionCount[id] += putBytes
+		sessionCount["adds"] += 1
+		if putBytes > sessionCount["biggest"] {
+			sessionCount["biggest"] = putBytes
+		}
+
+		jsonBytes, _ := nd.MarshalJSON()
+		fmt.Printf("ipld store node:\ncid:%s\nsize:%d\n%s\n", nd.Cid().String(), putBytes, string(jsonBytes))
+	}
+	
 	return nd.Cid(), nil
+}
+
+func (s *CborIpldStore) SessionCount(id string) int {
+	count, ok := sessionCount[id]
+	if !ok {
+		return 0
+	}
+	return count
 }
